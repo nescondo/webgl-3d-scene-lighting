@@ -1,0 +1,946 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Viewing and Projection</title>
+</head>
+<body>
+    <canvas id="webgl-canvas" width="500" height="500"></canvas>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/gl-matrix/2.8.1/gl-matrix-min.js"></script>
+<script>
+// Vertex shader source code
+const vertexShaderSource = `
+    attribute vec3 aPosition;
+    attribute vec3 vColor;
+    attribute vec3 aNormal;
+    uniform mat4 mMatrix, vMatrix, pMatrix;
+    uniform mat3 normalMatrix;
+    varying vec3 fColor;
+    varying vec3 fNormal;
+    varying vec3 fPosition;
+
+    void main() {
+        fColor = vColor;
+        fNormal = normalMatrix * aNormal;
+        vec4 worldPos = mMatrix * vec4(aPosition, 1.0);
+        fPosition = worldPos.xyz;
+
+        gl_Position = pMatrix * vMatrix * worldPos;
+    }
+`;
+</script>
+<script>
+// Fragment shader source code
+const fragmentShaderSource = `
+    precision mediump float;
+    varying vec3 fColor;
+    varying vec3 fNormal;
+    varying vec3 fPosition;
+    uniform vec3 uLightPos;
+    uniform vec3 uEyePos;
+
+    void main() {
+        // ambient
+        float Ka = 0.35;
+        float Ia = 1.0;
+        vec3 ambient = Ia * Ka * fColor;
+
+        vec3 N = normalize(fNormal);
+        vec3 L = normalize(uLightPos - fPosition);
+        vec3 E = normalize(uEyePos - fPosition);
+
+        // diffuse
+        float Kd = 0.8; // diffuse coeff.
+        float I  = 1.0; // light intensity
+        float cosTheta = max(dot(N, L), 0.0);
+        vec3 diffuse = Kd * I * cosTheta * fColor;
+
+        // specular
+        float Ks = 0.5; // specular coeff.
+        float n  = 32.0; // shininess
+        vec3 R = normalize(-L + 2.0 * dot(L, N) * N);
+        float cosPhi = max(dot(R, E), 0.0);
+        vec3 specular = Ks * I * pow(cosPhi, n) * vec3(1.0, 1.0, 1.0);
+
+        // phong shading
+        vec3 phong = ambient + diffuse + specular;
+        gl_FragColor = vec4(phong, 1.0);
+    }
+`;
+</script>
+<script type="text/javascript" src="setupShader.js"></script>
+<script>
+// Set up geometry data
+
+// Remember - can reuse same buffer b/c we draw sequentially!!! (so will only create 1)
+// Create a buffer and upload the vertex data
+const vertex_buffer = gl.createBuffer();
+const color_buffer = gl.createBuffer();
+const index_buffer = gl.createBuffer();
+const normal_buffer = gl.createBuffer();
+
+const aPositionLocation = gl.getAttribLocation(program, 'aPosition');
+const aColorLocation = gl.getAttribLocation(program, 'vColor');
+const aNormalLocation = gl.getAttribLocation(program, 'aNormal');
+gl.enableVertexAttribArray(aPositionLocation);
+gl.enableVertexAttribArray(aColorLocation);
+gl.enableVertexAttribArray(aNormalLocation);
+
+// same idea as buffer - we sequentially overwrite the location of mMatrix so no need for another
+// MVP matrices locations
+const mMatrixLocation = gl.getUniformLocation(program, "mMatrix");
+const vMatrixLocation = gl.getUniformLocation(program, "vMatrix");
+const pMatrixLocation = gl.getUniformLocation(program, "pMatrix");
+
+// for E and L vec.
+const uLightPosLocation = gl.getUniformLocation(program, "uLightPos");
+const uEyePosLocation = gl.getUniformLocation(program, "uEyePos");
+
+const normalMatrixLocation = gl.getUniformLocation(program, "normalMatrix");
+
+// setup and pass the camera and view matrices
+let vMatrix = mat4.create();
+let pMatrix = mat4.create();
+
+vMatrix = mat4.lookAt(vMatrix, [0, 0, 3], [0, 0, 0], [0, 1, 0]);
+let cMatrix = mat4.create(); // remember - view and camera matrices are closely related, but different!!!
+mat4.invert(cMatrix, vMatrix); // inversion of vMatrix
+
+
+// perspective projection
+pMatrix = mat4.perspective(pMatrix, 45, 1, 1, 10);
+
+function setCube(cubeVertices) {
+    const v = cubeVertices;
+
+    const faceVertices = new Float32Array([
+        // far face (2 triangles, 6 vertices)
+        v[0],v[1],v[2],   v[3],v[4],v[5],   v[6],v[7],v[8],    // tri 1: v0, v1, v2
+        v[0],v[1],v[2],   v[6],v[7],v[8],   v[9],v[10],v[11],  // tri 2: v0, v2, v3
+
+        // right face
+        v[0],v[1],v[2],   v[12],v[13],v[14], v[21],v[22],v[23], // tri 1: v0, v4, v7
+        v[0],v[1],v[2],   v[21],v[22],v[23], v[9],v[10],v[11],  // tri 2: v0, v7, v3
+
+        // bottom face
+        v[9],v[10],v[11],  v[21],v[22],v[23], v[18],v[19],v[20], // tri 1: v3, v7, v6
+        v[9],v[10],v[11],  v[18],v[19],v[20], v[6],v[7],v[8],    // tri 2: v3, v6, v2
+
+        // left face
+        v[3],v[4],v[5],   v[6],v[7],v[8],   v[18],v[19],v[20],  // tri 1: v1, v2, v6
+        v[3],v[4],v[5],   v[18],v[19],v[20], v[15],v[16],v[17], // tri 2: v1, v6, v5
+
+        // top face
+        v[0],v[1],v[2],   v[3],v[4],v[5],   v[15],v[16],v[17], // tri 1: v0, v1, v5
+        v[0],v[1],v[2],   v[15],v[16],v[17], v[12],v[13],v[14], // tri 2: v0, v5, v4
+
+        // near face
+        v[15],v[16],v[17], v[18],v[19],v[20], v[21],v[22],v[23], // tri 1: v5, v6, v7
+        v[15],v[16],v[17], v[21],v[22],v[23], v[12],v[13],v[14], // tri 2: v5, v7, v4
+    ]);
+
+    const faceNormals = new Float32Array([
+        // far face
+         0, 0,-1,  0, 0,-1,  0, 0,-1,  0, 0,-1,  0, 0,-1,  0, 0,-1,
+        // right face
+         1, 0, 0,  1, 0, 0,  1, 0, 0,  1, 0, 0,  1, 0, 0,  1, 0, 0,
+        // bottom face
+         0,-1, 0,  0,-1, 0,  0,-1, 0,  0,-1, 0,  0,-1, 0,  0,-1, 0,
+        // left face
+        -1, 0, 0, -1, 0, 0, -1, 0, 0, -1, 0, 0, -1, 0, 0, -1, 0, 0,
+        // top face
+         0, 1, 0,  0, 1, 0,  0, 1, 0,  0, 1, 0,  0, 1, 0,  0, 1, 0,
+        // near face
+         0, 0, 1,  0, 0, 1,  0, 0, 1,  0, 0, 1,  0, 0, 1,  0, 0, 1,
+    ]);
+
+    return [faceVertices, null, faceNormals];
+}
+
+// remember we use right-handed coord. system -> x = left/right, y = up/down, z = towards you/away from you
+function setCylinderSides(radius, height, numSeg) {
+    // calculate individual vertices within in each side/segment
+    const sides = [];
+    const normals = [];
+
+    // to note: this builds individual triangles (not whole segments of rectangles) - TRIANGLE_STRIP handles the connecting
+    for (let i = 0; i < numSeg; i++) {
+        const angle = (i / numSeg) * 2 * Math.PI;
+        const x = radius * Math.cos(angle);
+        const z = radius * Math.sin(angle);
+
+        // each normal vec. is just the perp. outward direction - x and z changes, but y always 0 (always upward)
+        const radial = vec3.normalize(vec3.create(), [x, 0, z]); // perpendicular to cylinder side
+
+        // top/bottom vertex for rectangle
+        sides.push(x, height / 2, z);
+        sides.push(x, -height / 2, z);
+
+        // top/bottom normal vectors corresponding to each vertex for rectangle
+        normals.push(radial[0], radial[1], radial[2]);
+        normals.push(radial[0], radial[1], radial[2]);
+    }
+
+    // connecting last segment
+    sides.push(radius, height / 2, 0);
+    sides.push(radius, -height / 2, 0);
+    normals.push(1, 0, 0);
+    normals.push(1, 0, 0);
+
+    return [new Float32Array(sides), new Float32Array(normals)];
+}
+
+// created w/ triangles solely (not approx. by rectangles made up of triangles like sides) - TRIANGLE_FAN
+function setCylinderDisks(radius, height, numSeg) {
+    const topDisk = [0, height / 2, 0]; // center of top disk
+    const topNormals = [0, 1, 0];
+    const computedTop = createDisk(radius, height, numSeg);
+
+    const bottomDisk = [0, -height / 2, 0]; // center of bottom disk
+    const bottomNormals = [0, -1, 0];
+    const computedBottom = createDisk(radius, -height, numSeg, true);
+    // both top and bottom disk will have same # of vertices, don't need to worry about which to choose
+    for (let i = 0; i < computedTop.length; i += 3) { // computedTop/computedBottom have indiv. vertices, so iterate by 3
+        topDisk.push(computedTop[i]);
+        topDisk.push(computedTop[i + 1]);
+        topDisk.push(computedTop[i + 2]);
+
+        bottomDisk.push(computedBottom[i]);
+        bottomDisk.push(computedBottom[i + 1]);
+        bottomDisk.push(computedBottom[i + 2]);
+
+        topNormals.push(0, 1, 0);
+        bottomNormals.push(0, -1, 0);
+    }
+
+    return [
+        new Float32Array(topDisk),
+        new Float32Array(bottomDisk),
+        new Float32Array(topNormals),
+        new Float32Array(bottomNormals)
+    ];
+}
+
+// helper to create disk - compute outer/rim vertices
+function createDisk(width, height, steps, reverse=false) {
+    // leave empty, so we can merge this w/ initial top/bottom vertices
+    const vertices = [];
+
+    // winding order -> counter-clockwise = face up (increment), clockwise = face down (decrement)
+    // bottom disk
+    if (reverse) {
+        for (let i = steps; i >= 0; i--) {
+            const angle = (i / steps) * 2 * Math.PI;
+            const x = width * Math.cos(angle);
+            const y = height / 2;
+            const z = width * Math.sin(angle)
+            vertices.push(x, y, z);
+        }
+    }
+    // top disk
+    else {
+        for (let i = 0; i <= steps; i++) {
+            const angle = (i / steps) * 2 * Math.PI;
+            const x = width * Math.cos(angle);
+            const y = height / 2;
+            const z = width * Math.sin(angle)
+            vertices.push(x, y, z);
+        }
+    }
+
+    return new Float32Array(vertices);
+}
+
+// stack = column, sector = row; each stack/sector has a square (made up of 2 triangles)
+function setSphere(radius, numStacks, numSectors) {
+    let vertices = [];
+    let normals = [];
+
+    // begin w/ each stack
+    for (let i = 0; i <= numStacks; i++) {
+        // phi - polar in this case
+        const stackAngle = (Math.PI / 2) - (Math.PI * (i / numStacks));
+
+        // iterate thru sectors
+        for (let j = 0; j <= numSectors; j++) {
+            // theta - azimuth in this case
+            const sectorAngle = (2 * Math.PI) * (j / numSectors);
+            const x = radius * Math.cos(stackAngle) * Math.cos(sectorAngle);
+            const y = radius * Math.sin(stackAngle);
+            const z = radius * Math.cos(stackAngle) * Math.sin(sectorAngle);
+            vertices.push(x, y, z);
+
+            const xNormal = Math.cos(stackAngle) * Math.cos(sectorAngle);
+            const yNormal = Math.sin(stackAngle);
+            const zNormal = Math.cos(stackAngle) * Math.sin(sectorAngle);
+            normals.push(xNormal, yNormal, zNormal);
+        }
+    }
+
+    // use indices to not repeat vertices for drawElements call
+    const indices = [];
+    for (let i = 0; i < numStacks; i++) {
+        for (let j = 0; j < numSectors; j++) {
+            const first = (i * (numSectors + 1)) + j;
+            const second = first + numSectors + 1;
+
+            // first triangle of stack
+            indices.push(first, second, first + 1);
+            // second triangle of stack
+            indices.push(second, second + 1, first + 1);
+        }
+    }
+
+    return [new Float32Array(vertices), new Uint16Array(indices), new Float32Array(normals)];
+}
+
+// need different colors to see visible cylinder/sphere rotation
+function threeColor(numVerts) {
+    const colors = [
+        1.0, 0.0, 0.0,
+        0.0, 1.0, 0.0,
+        0.0, 0.0, 1.0,
+    ];
+
+    const c = [];
+    for (let i = 0; i < numVerts; i++) {
+        const idx = (i % 3) * 3;
+        c.push(colors[idx], colors[idx+1], colors[idx+2]);
+    }
+    return new Float32Array(c);
+}
+
+// one solid color helper
+function oneColor(numVerts, color) {
+    const c = [];
+    for (let i = 0; i < numVerts; i++) {
+        c.push(color[0], color[1], color[2]);
+    }
+    return new Float32Array(c);
+}
+
+function draw() {
+    // Set up the viewport and clear the canvas
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.clearColor(0.4, 0.7, 1.0, 1.0);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.LESS);
+
+    // pass MVP matrices to the shader
+    gl.uniformMatrix4fv(vMatrixLocation, false, vMatrix);
+    gl.uniformMatrix4fv(pMatrixLocation, false, pMatrix);
+
+    // light position
+    gl.uniform3fv(uLightPosLocation, [0.0, 3.0, 3.0]);
+
+    // eye position (from cMatrix)
+    gl.uniform3fv(uEyePosLocation, [cMatrix[12], cMatrix[13], cMatrix[14]]); // mat4 is column-major!!!
+
+    scene.draw();
+}
+
+// compute the normal matrix and update shader w/ it
+function createNormalMatrix(mMatrix) {
+    const inverted  = mat4.invert(mat4.create(), mMatrix);   // M^-1
+    const transposed = mat4.transpose(mat4.create(), inverted); // (M^-1)^T
+    const normalMatrix = mat3.fromMat4(mat3.create(), transposed);
+    gl.uniformMatrix3fv(normalMatrixLocation, false, normalMatrix);
+}
+
+class Shape {
+    constructor(vertices, indices, mMatrix, drawType, solidColor=false, color=[1.0, 1.0, 1.0], normals=null) {
+        this.vertices = vertices;
+        this.indices = indices; // null for cylinder disks and sides
+        this.mMatrix = mMatrix;
+        this.drawType = drawType;
+        this.solidColor = solidColor;
+        this.color = color;
+        this.normals = normals;
+    }
+
+    drawCube(parentMatrix = mat4.create()) {
+        // compute combined matrix first before drawing
+        const combinedMatrix = mat4.create();
+        mat4.multiply(combinedMatrix, parentMatrix, this.mMatrix);
+        gl.uniformMatrix4fv(mMatrixLocation, false, combinedMatrix);
+        createNormalMatrix(combinedMatrix);
+
+        // draw and update buffer to contain cube vertices
+        gl.bindBuffer(gl.ARRAY_BUFFER, vertex_buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, this.vertices, gl.STATIC_DRAW);
+        gl.vertexAttribPointer(aPositionLocation, 3, gl.FLOAT, false, 0, 0);
+        gl.bindBuffer(gl.ARRAY_BUFFER, color_buffer);
+
+        if (this.solidColor) {
+            gl.bufferData(gl.ARRAY_BUFFER, oneColor(this.vertices.length / 3, this.color), gl.STATIC_DRAW);
+        } else {
+            gl.bufferData(gl.ARRAY_BUFFER, threeColor(this.vertices.length / 3), gl.STATIC_DRAW);
+        }
+        gl.vertexAttribPointer(aColorLocation, 3, gl.FLOAT, false, 0, 0);
+
+        // update buffer for per-vertex normals for Phong shading
+        gl.bindBuffer(gl.ARRAY_BUFFER, normal_buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, this.normals, gl.STATIC_DRAW);
+        gl.vertexAttribPointer(aNormalLocation, 3, gl.FLOAT, false, 0, 0);
+
+        gl.drawArrays(gl.TRIANGLES, 0, this.vertices.length / 3);
+    }
+
+    drawCylinderSides(parentMatrix = mat4.create()) {
+        // compute combined matrix first before drawing
+        const combinedMatrix = mat4.create();
+        mat4.multiply(combinedMatrix, parentMatrix, this.mMatrix);
+        gl.uniformMatrix4fv(mMatrixLocation, false, combinedMatrix);
+        createNormalMatrix(combinedMatrix);
+
+        // update buffer to contain cylinder side/segment vertices
+        gl.bindBuffer(gl.ARRAY_BUFFER, vertex_buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, this.vertices, gl.STATIC_DRAW);
+        gl.vertexAttribPointer(aPositionLocation, 3, gl.FLOAT, false, 0, 0);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, color_buffer);
+        if (this.solidColor) {
+            gl.bufferData(gl.ARRAY_BUFFER, oneColor(this.vertices.length / 3, this.color), gl.STATIC_DRAW);
+        } else {
+            gl.bufferData(gl.ARRAY_BUFFER, threeColor(this.vertices.length / 3), gl.STATIC_DRAW);
+        }
+        gl.vertexAttribPointer(aColorLocation, 3, gl.FLOAT, false, 0, 0);
+
+        // update buffer for per-vertex normals for Phong shading
+        gl.bindBuffer(gl.ARRAY_BUFFER, normal_buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, this.normals, gl.STATIC_DRAW);
+        gl.vertexAttribPointer(aNormalLocation, 3, gl.FLOAT, false, 0, 0);
+
+        // draw sides
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, this.vertices.length / 3);
+    }
+
+    drawDisk(parentMatrix = mat4.create()) {
+        // compute combined matrix first before drawing
+        const combinedMatrix = mat4.create();
+        mat4.multiply(combinedMatrix, parentMatrix, this.mMatrix);
+        gl.uniformMatrix4fv(mMatrixLocation, false, combinedMatrix);
+        createNormalMatrix(combinedMatrix);
+
+        // update buffer to contain disk vertices
+        gl.bindBuffer(gl.ARRAY_BUFFER, vertex_buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, this.vertices, gl.STATIC_DRAW);
+        gl.vertexAttribPointer(aPositionLocation, 3, gl.FLOAT, false, 0, 0);
+
+        // same but w/ colors
+        gl.bindBuffer(gl.ARRAY_BUFFER, color_buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, oneColor(this.vertices.length / 3, this.color), gl.STATIC_DRAW);
+        gl.vertexAttribPointer(aColorLocation, 3, gl.FLOAT, false, 0, 0);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, normal_buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, this.normals, gl.STATIC_DRAW);
+        gl.vertexAttribPointer(aNormalLocation, 3, gl.FLOAT, false, 0, 0);
+
+        gl.drawArrays(gl.TRIANGLE_FAN, 0, this.vertices.length / 3);
+    }
+
+    drawSphere(parentMatrix = mat4.create()) {
+        // compute combined matrix first before drawing
+        const combinedMatrix = mat4.create();
+        mat4.multiply(combinedMatrix, parentMatrix, this.mMatrix);
+        gl.uniformMatrix4fv(mMatrixLocation, false, combinedMatrix);
+        createNormalMatrix(combinedMatrix);
+
+        // update buffer to contain sphere vertices
+        gl.bindBuffer(gl.ARRAY_BUFFER, vertex_buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, this.vertices, gl.STATIC_DRAW);
+        gl.vertexAttribPointer(aPositionLocation, 3, gl.FLOAT, false, 0, 0);
+
+        // same but w/ colors
+        gl.bindBuffer(gl.ARRAY_BUFFER, color_buffer);
+
+        if (this.solidColor) {
+            gl.bufferData(gl.ARRAY_BUFFER, oneColor(this.vertices.length / 3, this.color), gl.STATIC_DRAW);
+        }
+        else {
+            gl.bufferData(gl.ARRAY_BUFFER, threeColor(this.vertices.length / 3), gl.STATIC_DRAW);
+        }
+        gl.vertexAttribPointer(aColorLocation, 3, gl.FLOAT, false, 0, 0);
+        
+        gl.bindBuffer(gl.ARRAY_BUFFER, normal_buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, this.normals, gl.STATIC_DRAW);
+        gl.vertexAttribPointer(aNormalLocation, 3, gl.FLOAT, false, 0, 0);
+
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, index_buffer);
+        gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, this.indices, gl.STATIC_DRAW);
+        gl.drawElements(gl.TRIANGLES, this.indices.length, gl.UNSIGNED_SHORT, 0);
+    }
+}
+
+class ObjectWebGL {
+    constructor(mMatrix = mat4.create(), solidColor=false) { // sets 4x4 identity immediately as parent
+        this.shapes = [];
+        this.mMatrix = mMatrix;
+        this.children = [];
+        this.solidColor = solidColor;
+    }
+
+    local_transform(matrix){
+        mat4.multiply(this.mMatrix, this.mMatrix, matrix);
+    }
+
+    draw(parentMatrix = mat4.create()) {
+        const combinedMatrix = mat4.create();
+        mat4.multiply(combinedMatrix, parentMatrix, this.mMatrix);
+
+        for (const shape of this.shapes) {
+            if (shape.drawType === 'cube' || shape.drawType === 'coloredCube') {
+                shape.drawCube(combinedMatrix);
+            } else if (shape.drawType === 'cylinderSides') {
+                shape.drawCylinderSides(combinedMatrix);
+            } else if (shape.drawType === 'disk') {
+                shape.drawDisk(combinedMatrix);
+            } else if (shape.drawType === 'sphere') {
+                shape.drawSphere(combinedMatrix);
+            }
+        }
+
+        // children may be shapes or parents (ObjectWebGL)
+        for (const child of this.children) {
+            if (typeof child.draw === 'function') {
+                // recursive draw if object is a parent (ObjectWebGL)
+                child.draw(combinedMatrix);
+            }
+        }
+    }
+}
+
+// scene hierarchy
+
+// layer 1 - overall scene
+const scene = new ObjectWebGL();
+
+// layer 2 - alien, cylinder (children of scene)
+const cylinder = new ObjectWebGL(mat4.fromTranslation(mat4.create(), [-1.0, -0.5, 0]));
+const [cylinderSides, cylinderSideNormals] = setCylinderSides(0.25, 0.5, 32);
+cylinder.shapes.push(new Shape(cylinderSides, null, mat4.create(), 'cylinderSides', true, [0.8, 0.6, 1.0], cylinderSideNormals)); // light purple
+const [topDisk, bottomDisk, topDiskNormals, bottomDiskNormals] = setCylinderDisks(0.25, 0.5, 32);
+cylinder.shapes.push(new Shape(topDisk, null, mat4.create(), 'disk', true, [1.0, 0.1, 0.6], topDiskNormals)); // pink
+cylinder.shapes.push(new Shape(bottomDisk, null, mat4.create(), 'disk', true, [1.0, 0.1, 0.6], bottomDiskNormals));
+scene.children.push(cylinder);
+
+const alien = new ObjectWebGL(mat4.fromTranslation(mat4.create(), [0, 0, 0]));
+scene.children.push(alien);
+
+// body (shape of alien)
+const bodyPoints = [
+    0.25,   0.4,  -.25,     // right, top,    far
+    -0.25,  0.4,  -.25,     // left,  top,    far
+    -0.25, -0.4,  -.25,     // left,  bottom, far
+    0.25,  -0.4,  -.25,     // right, bottom, far
+    0.25,   0.4,   .25,     // right, top,    near
+    -0.25,  0.4,   .25,     // left,  top,    near
+    -0.25, -0.4,   .25,     // left,  bottom, near
+    0.25,  -0.4,   .25      // right, bottom, near
+];
+const [bodyVertices, bodyIndices, bodyNormals] = setCube(bodyPoints);
+alien.shapes.push(new Shape(bodyVertices, bodyIndices, mat4.create(), 'coloredCube', true, [1.0, 1.0, 1.0], bodyNormals)); // white shirt
+
+// layer 3 - left leg, right leg, left arm, right arm, head (children of alien)
+
+// left leg
+const leftLeg = new ObjectWebGL(mat4.fromTranslation(mat4.create(), [-0.175, -.7, 0]));
+const legPoints = [
+    0.075,   0.3,  -.05,     // right, top,    far
+    -0.075,  0.3,  -.05,     // left,  top,    far
+    -0.075, -0.3,  -.05,     // left,  bottom, far
+    0.075,  -0.3,  -.05,     // right, bottom, far
+    0.075,   0.3,   .05,     // right, top,    near
+    -0.075,  0.3,   .05,     // left,  top,    near
+    -0.075, -0.3,   .05,     // left,  bottom, near
+    0.075,  -0.3,   .05      // right, bottom, near
+];
+const [leftLegVertices, leftLegIndices, leftLegNormals] = setCube(legPoints);
+leftLeg.shapes.push(new Shape(leftLegVertices, leftLegIndices, mat4.create(), 'coloredCube', true, [0.1, 0.2, 0.8], leftLegNormals)); // blue pants
+alien.children.push(leftLeg);
+
+// right leg
+const rightLeg = new ObjectWebGL(mat4.fromTranslation(mat4.create(), [0.175, -.7, 0]));
+const [rightLegVertices, rightLegIndices, rightLegNormals] = setCube(legPoints);
+rightLeg.shapes.push(new Shape(rightLegVertices, rightLegIndices, mat4.create(), 'coloredCube', true, [0.1, 0.2, 0.8], rightLegNormals)); // blue pants
+alien.children.push(rightLeg);
+
+// left arm
+const leftArm = new ObjectWebGL(mat4.fromTranslation(mat4.create(), [-.325, 0, 0]));
+const armPoints = [
+    0.075,   0.25,  -0.02,     // right, top,    near
+    -0.075,  0.25,  -0.02,     // left,  top,    near
+    -0.075, -0.25,  -0.02,     // left,  bottom, near
+    0.075,  -0.25,  -0.02,     // right, bottom, near
+    0.075,   0.25,  0.02,     // right, top,    near
+    -0.075,  0.25,  0.02,     // left,  top,    near
+    -0.075, -0.25,  0.02,     // left,  bottom, near
+    0.075,  -0.25,  0.02      // right, bottom, near
+];
+const [leftArmVertices, leftArmIndices, leftArmNormals] = setCube(armPoints);
+leftArm.shapes.push(new Shape(leftArmVertices, leftArmIndices, mat4.create(), 'coloredCube', true, [1.0, 1.0, 1.0], leftArmNormals)); // white shirt
+alien.children.push(leftArm);
+
+// right arm
+const rightArm = new ObjectWebGL(mat4.fromTranslation(mat4.create(), [.325, 0, 0]));
+const [rightArmVertices, rightArmIndices, rightArmNormals] = setCube(armPoints);
+rightArm.shapes.push(new Shape(rightArmVertices, rightArmIndices, mat4.create(), 'coloredCube', true, [1.0, 1.0, 1.0], rightArmNormals)); // white shirt
+alien.children.push(rightArm);
+
+// head
+const head = new ObjectWebGL(mat4.fromTranslation(mat4.create(), [0, 0.65, 0]));
+const [headVertices, headIndices, headNormals] = setSphere(0.25, 20, 20);
+head.shapes.push(new Shape(headVertices, headIndices, mat4.create(), 'sphere', false, [1.0,1.0,1.0], headNormals));
+alien.children.push(head);
+
+// layer 4 eye (child of head)
+
+// eye
+const eye = new ObjectWebGL(mat4.fromTranslation(mat4.create(), [0, 0, 0.25]));
+const [eyeVertices, eyeIndices, eyeNormals] = setSphere(0.1, 20, 20);
+eye.shapes.push(new Shape(eyeVertices, eyeIndices, mat4.create(), 'sphere', true, [1.0,1.0,1.0], eyeNormals));
+head.children.push(eye);
+
+// layer 5 pupil (child of eye)
+const pupil = new ObjectWebGL(mat4.fromTranslation(mat4.create(), [0, 0, 0.075]));
+const [pupilVertices, pupilIndices, pupilNormals] = setSphere(0.05, 20, 20);
+pupil.shapes.push(new Shape(pupilVertices, pupilIndices, mat4.create(), 'sphere', true, [1.0, 0.0, 0.0], pupilNormals));
+eye.children.push(pupil);
+
+// floor
+const floorPoints = [
+     2.0,  0.05, -2.0,
+    -2.0,  0.05, -2.0,
+    -2.0, -0.05, -2.0,
+     2.0, -0.05, -2.0,
+     2.0,  0.05,  2.0,
+    -2.0,  0.05,  2.0,
+    -2.0, -0.05,  2.0,
+     2.0, -0.05,  2.0,
+];
+const [floorVertices, floorIndices, floorNormals] = setCube(floorPoints);
+const floor = new ObjectWebGL(mat4.fromTranslation(mat4.create(), [0, -1.0, 0]));
+floor.shapes.push(new Shape(floorVertices, floorIndices, mat4.create(), 'coloredCube', true, [0.2, 0.6, 0.15], floorNormals));
+scene.children.push(floor);
+
+// rock
+const rockColor = [0.45, 0.42, 0.38];
+const rocks = [
+    { pos: [-0.6, -0.88, 0.3],  radius: 0.12 },
+    { pos: [ 0.5, -0.91, 0.5],  radius: 0.09 },
+    { pos: [ 0.9, -0.89, -0.3], radius: 0.11 },
+    { pos: [-0.3, -0.90, -0.6], radius: 0.10 },
+    { pos: [ 1.3, -0.92,  0.1], radius: 0.07 },
+    { pos: [ 0.6, -0.91, -0.7], radius: 0.13 },
+    { pos: [ 0.2, -0.93, -0.9], radius: 0.08 },
+    { pos: [-0.8, -0.90,  0.8], radius: 0.06 },
+    { pos: [ 1.1, -0.91,  0.7], radius: 0.10 },
+    { pos: [-1.4, -0.92,  0.5], radius: 0.08 },
+];
+
+for (const rock of rocks) {
+    const curRock = new ObjectWebGL(mat4.fromTranslation(mat4.create(), rock.pos));
+    const [rv, ri, rn] = setSphere(rock.radius, 10, 10);
+    curRock.shapes.push(new Shape(rv, ri, mat4.create(), 'sphere', true, rockColor, rn));
+    scene.children.push(curRock);
+}
+
+// sun
+const sun = new ObjectWebGL(mat4.fromTranslation(mat4.create(), [1.4, 1.3, -0.8]));
+const [sunVertices, sunIndices, sunNormals] = setSphere(0.2, 20, 20);
+sun.shapes.push(new Shape(sunVertices, sunIndices, mat4.create(), 'sphere', true, [1.0, 0.9, 0.2], sunNormals));
+scene.children.push(sun);
+
+// clouds
+const cloudPuffs = [
+    { pos: [0.0,  0.0,  0.0],  radius: 0.18 }, // center
+    { pos: [0.22, 0.0,  0.0],  radius: 0.15 }, // right
+    { pos: [-0.22, 0.0, 0.0],  radius: 0.14 }, // left
+    { pos: [0.1,  0.1,  0.0],  radius: 0.13 }, // top-right
+    { pos: [-0.1, 0.1,  0.0],  radius: 0.12 }, // top-left
+    { pos: [0.32, 0.05, 0.0],  radius: 0.10 }, // far right
+    { pos: [-0.3, 0.05, 0.0],  radius: 0.10 }, // far left
+];
+
+// cloud 1
+const cloud = new ObjectWebGL(mat4.fromTranslation(mat4.create(), [-1.2, 1.1, -0.8]));
+for (const puff of cloudPuffs) {
+    const [cv, ci, cn] = setSphere(puff.radius, 12, 12);
+    cloud.shapes.push(new Shape(cv, ci, mat4.fromTranslation(mat4.create(), puff.pos), 'sphere', true, [1.0, 1.0, 1.0], cn));
+}
+
+// cloud 2
+const cloud2 = new ObjectWebGL(mat4.fromTranslation(mat4.create(), [0.1, 1.1, -0.8]));
+for (const puff of cloudPuffs) {
+    const [cv, ci, cn] = setSphere(puff.radius, 12, 12);
+    cloud2.shapes.push(new Shape(cv, ci, mat4.fromTranslation(mat4.create(), puff.pos), 'sphere', true, [1.0, 1.0, 1.0], cn));
+}
+
+scene.children.push(cloud);
+scene.children.push(cloud2);
+
+document.addEventListener('keydown', (e)=>{
+    const identity = mat4.create();
+    // translation of scene (layer 1)
+    if (e.key == 'w'){
+        scene.local_transform(mat4.fromTranslation(identity, [0, 0.1, 0]));
+    }
+    else if (e.key == 's'){
+        scene.local_transform(mat4.fromTranslation(identity, [0, -0.1, 0]));
+    }
+    else if (e.key == 'a'){
+        scene.local_transform(mat4.fromTranslation(identity, [-0.1, 0, 0]));
+    }
+    else if (e.key == 'd'){
+        scene.local_transform(mat4.fromTranslation(identity, [0.1, 0, 0]));
+    }
+
+    // rotation of scene (layer 1)
+    else if (e.key == 'e'){
+        scene.local_transform(mat4.fromZRotation(identity, -0.1));
+    }
+    else if (e.key == 'q'){
+        scene.local_transform(mat4.fromZRotation(identity, 0.1));
+    }
+
+    // scaling of scene (layer 1)
+    else if (e.key == 'r') {
+        scene.local_transform(mat4.fromScaling(identity, [1.1, 1.1, 1.1]));
+    }
+    else if (e.key == 't') {
+        scene.local_transform(mat4.fromScaling(identity, [0.9, 0.9, 0.9]));
+    }
+
+    // translation of alien (layer 2)
+    else if (e.key == '1'){
+        alien.local_transform(mat4.fromTranslation(identity, [0, 0.1, 0]));
+    }
+    else if (e.key == '2'){
+        alien.local_transform(mat4.fromTranslation(identity, [0, -0.1, 0]));
+    }
+    else if (e.key == '3'){
+        alien.local_transform(mat4.fromTranslation(identity, [-0.1, 0, 0]));
+    }
+    else if (e.key == '4'){
+        alien.local_transform(mat4.fromTranslation(identity, [0.1, 0, 0]));
+    }
+
+    // rotation of alien (layer 2)
+    else if (e.key == '5'){
+        alien.local_transform(mat4.fromZRotation(identity, -0.1));
+    }
+    else if (e.key == '6'){
+        alien.local_transform(mat4.fromZRotation(identity, 0.1));
+    }
+
+    // scaling of alien (layer 2)
+    else if (e.key == '7'){
+        alien.local_transform(mat4.fromScaling(identity, [1.1, 1.1, 1.1]));
+    }
+    else if (e.key == '8'){
+        alien.local_transform(mat4.fromScaling(identity, [0.9, 0.9, 0.9]));
+    }
+
+    // translation of cylinder (layer 2)
+    else if (e.key == '!'){
+        cylinder.local_transform(mat4.fromTranslation(identity, [0, 0.1, 0]));
+    }
+    else if (e.key == '@'){
+        cylinder.local_transform(mat4.fromTranslation(identity, [0, -0.1, 0]));
+    }
+    else if (e.key == '#'){
+        cylinder.local_transform(mat4.fromTranslation(identity, [-0.1, 0, 0]));
+    }
+    else if (e.key == '$'){
+        cylinder.local_transform(mat4.fromTranslation(identity, [0.1, 0, 0]));
+    }
+
+    // rotation of cylinder (layer 2)
+    else if (e.key == '%'){
+        cylinder.local_transform(mat4.fromZRotation(identity, -0.1));
+    }
+    else if (e.key == '^'){
+        cylinder.local_transform(mat4.fromZRotation(identity, 0.1));
+    }
+
+    // scaling of cylinder (layer 2)
+    else if (e.key == '&'){
+        cylinder.local_transform(mat4.fromScaling(identity, [1.1, 1.1, 1.1]));
+    }
+    else if (e.key == '*'){
+        cylinder.local_transform(mat4.fromScaling(identity, [0.9, 0.9, 0.9]));
+    }
+
+    // translation of head (layer 3)
+    else if (e.key == 'f'){
+        head.local_transform(mat4.fromTranslation(identity, [0, 0.1, 0]));
+    }
+    else if (e.key == 'g'){
+        head.local_transform(mat4.fromTranslation(identity, [0, -0.1, 0]));
+    }
+    else if (e.key == 'h'){
+        head.local_transform(mat4.fromTranslation(identity, [-0.1, 0, 0]));
+    }
+    else if (e.key == 'j'){
+        head.local_transform(mat4.fromTranslation(identity, [0.1, 0, 0]));
+    }
+
+    // rotation of head (layer 3)
+    else if (e.key == 'k'){
+        head.local_transform(mat4.fromZRotation(identity, -0.1));
+    }
+    else if (e.key == 'l'){
+        head.local_transform(mat4.fromZRotation(identity, 0.1));
+    }
+
+    // scaling of alien (layer 3)
+    else if (e.key == ';'){
+        head.local_transform(mat4.fromScaling(identity, [1.1, 1.1, 1.1]));
+    }
+    else if (e.key == '\''){
+        head.local_transform(mat4.fromScaling(identity, [0.9, 0.9, 0.9]));
+    }
+
+    // scaling of alien eye (layer 4)
+    else if (e.key == 'c') {
+        eye.local_transform(mat4.fromScaling(identity, [1.1, 1.1, 1.1]));
+    }
+    else if (e.key == 'v') {
+        eye.local_transform(mat4.fromScaling(identity, [0.9, 0.9, 0.9]));
+    }
+
+    else if (e.key == 'ArrowLeft'){
+        const yRot = mat4.fromYRotation(mat4.create(), -0.1)
+        mat4.multiply(cMatrix, cMatrix, yRot);
+        mat4.invert(vMatrix, cMatrix);
+    }
+    else if (e.key == 'ArrowRight'){
+        const yRot = mat4.fromYRotation(mat4.create(), 0.1)
+        mat4.multiply(cMatrix, cMatrix, yRot);
+        mat4.invert(vMatrix, cMatrix);
+    }
+    else if (e.key == 'ArrowUp'){
+        const xRot = mat4.fromXRotation(mat4.create(), -0.1)
+        mat4.multiply(cMatrix, cMatrix, xRot);
+        mat4.invert(vMatrix, cMatrix);
+    }
+    else if (e.key == 'ArrowDown'){
+        const xRot = mat4.fromXRotation(mat4.create(), 0.1)
+        mat4.multiply(cMatrix, cMatrix, xRot);
+        mat4.invert(vMatrix, cMatrix);
+    }
+    else if (e.key == 'b'){
+        const zRot = mat4.fromZRotation(mat4.create(), -0.1)
+        mat4.multiply(cMatrix, cMatrix, zRot);
+        mat4.invert(vMatrix, cMatrix);
+    }
+    else if (e.key == 'n'){
+        const zRot = mat4.fromZRotation(mat4.create(), 0.1)
+        mat4.multiply(cMatrix, cMatrix, zRot);
+        mat4.invert(vMatrix, cMatrix);
+    }
+    draw();
+}, false);
+
+const instructions = document.createElement('div');
+instructions.style.position = 'absolute';
+instructions.style.top = '10px';
+instructions.style.left = '520px';
+instructions.style.color = 'black';
+instructions.style.fontFamily = 'Arial, sans-serif';
+instructions.style.fontSize = '14px';
+instructions.style.lineHeight = '1.6';
+instructions.style.display = 'flex';
+instructions.style.flexDirection = 'row';
+instructions.style.gap = '20px';
+
+instructions.innerHTML = `
+    <div>
+        <h3>Scene Controls (Layer 1):</h3>
+        <p><strong>Translation:</strong></p>
+        <ul>
+            <li>W/S: Up/Down</li>
+            <li>A/D: Left/Right</li>
+        </ul>
+        <p><strong>Rotation:</strong></p>
+        <ul>
+            <li>Q/E: CCW/CW</li>
+        </ul>
+        <p><strong>Scaling:</strong></p>
+        <ul>
+            <li>R/T: Larger/Smaller</li>
+        </ul>
+    </div>
+    <div>
+        <h3>Alien Controls (Layer 2):</h3>
+        <p><strong>Translation:</strong></p>
+        <ul>
+            <li>1/2: Up/Down</li>
+            <li>3/4: Left/Right</li>
+        </ul>
+        <p><strong>Rotation:</strong></p>
+        <ul>
+            <li>5/6: CCW/CW</li>
+        </ul>
+        <p><strong>Scaling:</strong></p>
+        <ul>
+            <li>7/8: Larger/Smaller</li>
+        </ul>
+
+        <h3>Cylinder Controls (Layer 2):</h3>
+        <p><strong>Translation:</strong></p>
+        <ul>
+            <li>!/@: Up/Down</li>
+            <li>#/$: Left/Right</li>
+        </ul>
+        <p><strong>Rotation:</strong></p>
+        <ul>
+            <li>%/^: CCW/CW</li>
+        </ul>
+        <p><strong>Scaling:</strong></p>
+        <ul>
+            <li>&/*: Larger/Smaller</li>
+        </ul>
+    </div>
+    <div>
+        <h3>Alien Head Controls (Layer 3):</h3>
+        <p><strong>Translation:</strong></p>
+        <ul>
+            <li>f/g: Up/Down</li>
+            <li>h/j: Left/Right</li>
+        </ul>
+        <p><strong>Rotation:</strong></p>
+        <ul>
+            <li>k/l: CCW/CW</li>
+        </ul>
+        <p><strong>Scaling:</strong></p>
+        <ul>
+            <li>semi-colon (;)/single quote ('): Larger/Smaller</li>
+        </ul>
+    </div>
+    <div>
+        <h3>Alien Eye Controls (Layer 4):</h3>
+        <p><strong>Scaling:</strong></p>
+        <ul>
+            <li>C/V: Larger/Smaller</li>
+        </ul>
+    </div>
+    <div>
+        <h3>Camera Controls:</h3>
+        <ul>
+            <li>Arrow Up/Down: Pitch</li>
+            <li>Arrow Left/Right: Yaw</li>
+            <li>B/N: Roll</li>
+        </ul>
+    </div>
+`;
+
+document.body.appendChild(instructions);
+
+draw();
+
+</script>
+</body>
+</html>
